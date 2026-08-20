@@ -1,0 +1,76 @@
+[project]
+name = "sentinel-api"
+version = "0.1.0"
+description = "Sentinel — evidence-first assessment infrastructure (API)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0.36",
+    "psycopg[binary]>=3.2",
+    "alembic>=1.14",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "argon2-cffi>=23.1",
+    "cryptography>=43.0",
+    "pyjwt>=2.9",
+    "pyotp>=2.9",
+    "redis>=5.2",
+    "python-multipart>=0.0.12",
+    "email-validator>=2.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "coverage>=7.6",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sentinel_api*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "C4"]
+ignore = ["S101"]  # assert is fine in tests
+
+[tool.ruff.lint.per-file-ignores]
+# S105/S106: literal credentials in tests are the point.
+# S608: the RLS invariant query is assembled from a module constant, not input.
+# S603/S607: these tests shell out to `docker` on purpose — the judge
+# suite is worthless against a mocked container runtime.
+"tests/*" = ["S105", "S106", "S608", "S603", "S607"]
+# B008: `Depends(...)` in a default is FastAPI's dependency-injection idiom,
+# not an accidental mutable default.
+"sentinel_api/**/router.py" = ["B008"]
+"sentinel_api/**/judge_router.py" = ["B008"]
+"sentinel_api/tenancy/deps.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+warn_return_any = true
+
+# The audit package is the product's differentiator. It gets strict typing.
+[[tool.mypy.overrides]]
+module = "sentinel_api.audit.*"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning"]
+markers = [
+    "security: security-boundary tests that must never be skipped",
+]

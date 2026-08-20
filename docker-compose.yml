@@ -1,0 +1,218 @@
+# Sentinel — local development stack.
+#
+# NOT PRODUCTION. Two things here are deliberately unsafe and must never be
+# copied to a deployed environment:
+#   1. judge-worker mounts the Docker socket (equivalent to root on the host)
+#   2. signing keys are files in a local volume
+# See DEPLOYMENT.md §1 and SECURITY.md §3.
+
+name: sentinel
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+      SENTINEL_APP_USER: ${POSTGRES_APP_USER}
+      SENTINEL_APP_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      SENTINEL_MIGRATE_USER: ${POSTGRES_MIGRATE_USER}
+      SENTINEL_MIGRATE_PASSWORD: ${POSTGRES_MIGRATE_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_SUPERUSER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_BUCKET_EVIDENCE: ${S3_BUCKET_EVIDENCE}
+      S3_BUCKET_TESTCASES: ${S3_BUCKET_TESTCASES}
+    volumes:
+      - ./infrastructure/minio/bootstrap.sh:/bootstrap.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap.sh"]
+
+  keygen:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    command: ["python", "-m", "scripts.keygen", "--out", "/run/keys"]
+    volumes:
+      - keys:/run/keys
+      - ./scripts:/app/scripts:ro
+
+  migrate:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    working_dir: /app/apps/api
+    environment:
+      SENTINEL_ENV: ${SENTINEL_ENV}
+      # Migrations run as the schema OWNER, never as the app role.
+      DATABASE_URL: ${MIGRATION_DATABASE_URL}
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    command: ["python", "-m", "scripts.seed"]
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/apps/api:/app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    command: ["uvicorn", "sentinel_api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    working_dir: /app/apps/api
+    env_file: .env
+    volumes:
+      - ./apps/api:/app/apps/api
+      - keys:/run/keys:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      keygen:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+    command: ["npm", "run", "dev"]
+    working_dir: /app/apps/web
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${API_BASE_URL}
+      NODE_ENV: development
+    volumes:
+      - ./apps/web:/app/apps/web
+      - web-node-modules:/app/apps/web/node_modules
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_started
+
+  # The sandbox images. Built, never run as services — the judge worker starts
+  # containers from them one submission at a time.
+  judge-python311:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/judge-python311.Dockerfile
+    image: sentinel-judge-python311:latest
+    profiles: ["build-only"]
+
+  judge-cpp20:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/judge-cpp20.Dockerfile
+    image: sentinel-judge-cpp20:latest
+    profiles: ["build-only"]
+
+  judge-java17:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/judge-java17.Dockerfile
+    image: sentinel-judge-java17:latest
+    profiles: ["build-only"]
+
+  judge-worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/judge.Dockerfile
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/apps/api:/app/workers/judge:/app
+      SENTINEL_API_PATH: /app/apps/api
+      JUDGE_IMAGE_PYTHON311: sentinel-judge-python311:latest
+      JUDGE_IMAGE_CPP20: sentinel-judge-cpp20:latest
+      JUDGE_IMAGE_JAVA17: sentinel-judge-java17:latest
+      JUDGE_SECCOMP_PROFILE: /app/infrastructure/security/seccomp-judge.json
+      # runc shares the host kernel. Set to `runsc` on a host with gVisor
+      # installed for a stronger boundary — see ADR-0022.
+      JUDGE_RUNTIME: runc
+    # DEV ONLY. The Docker socket is root-equivalent on the host.
+    # Production uses a rootless daemon on an isolated host pool.
+    #
+    # Note what this means: compromising the *worker* is game over, which is
+    # exactly why the worker runs no submission code itself and why the API
+    # cannot reach a container runtime at all.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./infrastructure/security:/app/infrastructure/security:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles: ["judge"]   # started with: docker compose --profile judge up
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  web-node-modules:
+  keys:

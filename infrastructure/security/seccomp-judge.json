@@ -1,0 +1,108 @@
+{
+  "_comment_1": "Sentinel judge seccomp profile. Applied with --security-opt seccomp=.",
+  "_comment_2": "READ THIS BEFORE CHANGING IT. Passing a profile REPLACES Docker's builtin default-deny profile; the two do not compose. An earlier version of this file was a default-deny allowlist and containers would not start at all, because runc needs syscalls during container init that a hand-written allowlist will not think of (fstatfs on /proc/thread-self/fd was the one that surfaced first). Reimplementing Docker's ~350-syscall allowlist here would mean maintaining it against every runc release, and getting it subtly wrong is worse than the deny-list below: a broken allowlist fails closed and visibly, but a stale one fails open and silently.",
+  "_comment_3": "So this is a default-ALLOW profile with an explicit deny-list. That is weaker in principle than default-deny, and it is not the primary control. The primary controls are --network=none, --cap-drop=ALL, --user 65534, --read-only, no-new-privileges and the cgroup limits. This profile is the layer that still holds if one of those is misconfigured, and it is the reason socket() fails even when the network namespace is not the one we expected.",
+  "_comment_4": "Verified by tests/security/test_judge_sandbox.py, which asserts both that the denied syscalls fail under this profile AND that they succeed without it. A profile that blocks nothing would otherwise pass silently.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"],
+  "syscalls": [
+    {
+      "_comment": "Networking. Redundant with --network=none, deliberately.",
+      "names": [
+        "socket",
+        "socketpair",
+        "connect",
+        "bind",
+        "listen",
+        "accept",
+        "accept4",
+        "sendto",
+        "sendmsg",
+        "sendmmsg",
+        "recvfrom",
+        "recvmsg",
+        "recvmmsg",
+        "getpeername",
+        "setsockopt",
+        "getsockopt",
+        "shutdown"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Namespace and mount manipulation: the raw material of a container escape.",
+      "names": [
+        "mount",
+        "umount",
+        "umount2",
+        "pivot_root",
+        "chroot",
+        "unshare",
+        "setns",
+        "move_mount",
+        "open_tree",
+        "fsopen",
+        "fsconfig",
+        "fsmount",
+        "fspick"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Reading or writing another process. Nothing a submission does needs these, and they defeat process isolation inside the container.",
+      "names": ["ptrace", "process_vm_readv", "process_vm_writev", "kcmp"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Kernel surface: module loading, eBPF, perf, kexec. Historically the richest source of local privilege escalation.",
+      "names": [
+        "bpf",
+        "perf_event_open",
+        "init_module",
+        "finit_module",
+        "delete_module",
+        "kexec_load",
+        "kexec_file_load",
+        "userfaultfd",
+        "open_by_handle_at",
+        "name_to_handle_at",
+        "lookup_dcookie"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Host state a submission has no business touching. Blocked even though cap-drop already covers most of them, because that is the point of a second layer.",
+      "names": [
+        "reboot",
+        "swapon",
+        "swapoff",
+        "settimeofday",
+        "clock_settime",
+        "clock_adjtime",
+        "adjtimex",
+        "acct",
+        "quotactl",
+        "syslog",
+        "sethostname",
+        "setdomainname",
+        "nfsservctl",
+        "vhangup",
+        "pciconfig_read",
+        "ioperm",
+        "iopl"
+      ],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    },
+    {
+      "_comment": "Kernel keyring. Shared with the host and not namespaced in the way people assume.",
+      "names": ["add_key", "request_key", "keyctl"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 1
+    }
+  ]
+}

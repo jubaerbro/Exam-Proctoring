@@ -1,0 +1,59 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+!.env.local.example
+*.pem
+*.key
+!infrastructure/**/*.pub
+secrets/
+keys/
+# Development signing keys written by scripts/keygen.py when not in a container.
+.keys/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# Local infrastructure state
+.data/
+minio-data/
+postgres-data/
+redis-data/
+
+# Editors / OS
+# .vscode is shared deliberately: the launch configs encode non-obvious facts
+# (uvicorn's reloader needs `subProcess`, the API must load .env.local rather
+# than .env) that every contributor would otherwise rediscover. Personal files
+# inside it are still ignored.
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local development scratch (not part of the project)
+.devkeys/
+.devenv
+migrate-error.txt
+vscode-setup.zip
